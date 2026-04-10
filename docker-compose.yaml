@@ -1,0 +1,24 @@
+services:
+  timescaledb:
+    # https://docs2.tigerdata.com/docs/get-started/choose-your-path/install-timescaledb
+    image: timescale/timescaledb:latest-pg18
+    container_name: benchmark-timescaledb
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    env_file: .env
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+      - ./TimescaleDB_coding_assignment-RD_eng_setup/cpu_usage.sql:/docker-entrypoint-initdb.d/10_schema.sql
+      - ./TimescaleDB_coding_assignment-RD_eng_setup/cpu_usage.csv:/docker-entrypoint-initdb.d/cpu_usage.csv
+      - ./TimescaleDB_coding_assignment-RD_eng_setup/load_data.sh:/docker-entrypoint-initdb.d/20_load_data.sh
+
+    # https://www.postgresql.org/docs/current/app-pg-isready.html
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  timescaledb_data:

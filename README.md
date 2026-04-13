@@ -17,19 +17,13 @@ docker build -t benchmark-tool .
 Example from assignment
 
 ```bash
-docker run --network host benchmark-tool --file /path/to/csv --workers 10
+docker run --network host benchmark-tool --file query_params.csv --workers 10
 ```
 
-STDIN
+STDIN from host machine
 
 ```bash
 cat ./TimescaleDB_coding_assignment-RD_eng_setup/query_params.csv | docker run -i --network host benchmark-tool --workers 10
-```
-
-making sure that we can run the setup
-
-```bash
-docker compose down -v && docker compose up -d && sleep 10 && docker run --network host benchmark-tool --file query_params.csv --workers 10
 ```
 
 ### constraints considered

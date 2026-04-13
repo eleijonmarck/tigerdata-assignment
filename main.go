@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"encoding/csv"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log/slog"
 	"os"
@@ -23,7 +25,6 @@ import (
 // - for each CSV row: hash hostname → pick worker channel → send job
 // - close worker channels when CSV is done
 // - collect all durations from results channel
-// - call stats.Compute() + print
 
 type config struct {
 	connectionString string
@@ -37,6 +38,13 @@ func loadConfig() config {
 	return config{connectionString: cs}
 }
 
+const (
+	// Replace time.RFC3339 with the custom TimeLayout string "2006-01-02 15:04:05".
+	TimeLayout = "2006-01-02 15:04:05"
+	// the maxmin query for getting the cpu usage across each minute
+	maxMinBucketQuery = `SELECT time_bucket('1 minute', ts) AS bucket, max(usage), min(usage) FROM cpu_usage WHERE host = $1 AND ts >= $2 AND ts <= $3 GROUP BY bucket;`
+)
+
 type QueryTask struct {
 	Hostname string
 	Startime time.Time
@@ -47,19 +55,17 @@ type QueryResult struct {
 	Duration time.Duration
 }
 
-const maxMinBucketQuery = `SELECT time_bucket('1 minute', ts) AS bucket, max(usage), min(usage) FROM cpu_usage WHERE host = $1 AND ts >= $2 AND ts <= $3 GROUP BY bucket;`
-
 func main() {
 	cfg := loadConfig()
 
 	workers := flag.Int("workers", 1, "number of concurrent workers")
 	filePath := flag.String("file", "", "path to CSV file (default: stdin)")
-	silent := flag.Bool("silent", false, "disable all unstructured logs")
+	verbose := flag.Bool("verbose", false, "enable standard debug logs to stdout")
 	flag.Parse()
 
-	var logOutput io.Writer = os.Stdout
-	if *silent {
-		logOutput = io.Discard
+	var logOutput io.Writer = io.Discard
+	if *verbose {
+		logOutput = os.Stdout
 	}
 	logger := slog.New(slog.NewJSONHandler(logOutput, nil))
 	slog.SetDefault(logger)
@@ -107,16 +113,23 @@ func main() {
 		os.Exit(1)
 	}
 
+	// first attemptt with a single task queue
+	// tasks := make(chan QueryTask, 100)
 	// buffered channel, to wait before the workers are ready to receive tasks
-	tasks := make(chan QueryTask, 100)
+	// Create an array/slice of channels
+	workerChannels := make([]chan QueryTask, *workers)
 
 	// NOTE: WE NEED TO CLEAR the buffered results channel so that we dont block workers
 	// this happens if we have a buffered channel that is smaller than the number of rows and we dont clear it
 	results := make(chan QueryResult, 100)
+
 	var wg sync.WaitGroup
 	for i := 0; i < *workers; i++ {
+		// Initialize the specific buffered channel for THIS worker
+		workerChannels[i] = make(chan QueryTask, 100)
 		wg.Add(1)
-		go Worker(ctx, pool, tasks, results, &wg)
+		// Give the worker its very own private channel
+		go Worker(ctx, pool, workerChannels[i], results, &wg)
 	}
 
 	var finalDurations []time.Duration
@@ -141,10 +154,17 @@ func main() {
 			slog.Error("parsing row failed", "error", err)
 			continue
 		}
-		tasks <- t
+		workerIndex := getWorkerIndex(t.Hostname, *workers)
+
+		// Send the task strictly to that worker's private channel
+		workerChannels[workerIndex] <- t
 	}
 
-	close(tasks)
+	// Replace your current `close(tasks)` with this:
+	for i := 0; i < *workers; i++ {
+		close(workerChannels[i])
+	}
+
 	slog.Info("waiting for workers")
 	wg.Wait()
 	slog.Info("workers finished")
@@ -212,16 +232,16 @@ func parseRow(reader *csv.Reader) (QueryTask, error) {
 		// If it's a faulty row (wrong column count, etc), we throw a custom error
 		return QueryTask{}, fmt.Errorf("faulty csv row: %w", err)
 	}
+	if len(record) != 3 {
+		// expected 3 records from the query paramters
+		return QueryTask{}, fmt.Errorf("wrong number of fields in csv, expected 3 got %d", len(record))
+	}
 
-	// Replace time.RFC3339 with the custom layout string "2006-01-02 15:04:05".
-	const layout = "2006-01-02 15:04:05"
-	// 2. Parse Start Time
-	startTime, err := time.Parse(layout, record[1])
+	startTime, err := time.Parse(TimeLayout, record[1])
 	if err != nil {
 		return QueryTask{}, fmt.Errorf("failed to parse start time row %v: %w", record, err)
 	}
-	// 3. Parse End Time
-	endTime, err := time.Parse(layout, record[2])
+	endTime, err := time.Parse(TimeLayout, record[2])
 	if err != nil {
 		return QueryTask{}, fmt.Errorf("failed to parse end time row %v: %w", record, err)
 	}
@@ -245,6 +265,7 @@ func prettyPrintResults(results []time.Duration) {
 	numQueries := len(results)
 	minQueryTime := results[0]
 	maxQueryTime := results[numQueries-1]
+	p95QueryTime := results[int(float64(len(results))*0.95)]
 
 	var medianQueryTime time.Duration
 	if numQueries%2 == 0 {
@@ -259,12 +280,41 @@ func prettyPrintResults(results []time.Duration) {
 	}
 	avgQueryTime := totalTime / time.Duration(numQueries)
 
-	fmt.Println("\n--- Benchmark Results ---")
-	fmt.Printf("Number of queries processed:         %d\n", numQueries)
-	fmt.Printf("Total processing time (all queries): %v\n", totalTime)
-	fmt.Printf("Minimum query time:                  %v\n", minQueryTime)
-	fmt.Printf("Median query time:                   %v\n", medianQueryTime)
-	fmt.Printf("Average query time:                  %v\n", avgQueryTime)
-	fmt.Printf("Maximum query time:                  %v\n", maxQueryTime)
-	fmt.Println("-------------------------")
+	type BenchmarkStats struct {
+		NumQueries          int    `json:"num_queries"`
+		TotalProcessingTime string `json:"total_processing_time"`
+		MinQueryTime        string `json:"min_query_time"`
+		MedianQueryTime     string `json:"median_query_time"`
+		AvgQueryTime        string `json:"avg_query_time"`
+		MaxQueryTime        string `json:"max_query_time"`
+		P95QueryTime        string `json:"p95_query_time"`
+	}
+
+	stats := BenchmarkStats{
+		NumQueries:          numQueries,
+		TotalProcessingTime: totalTime.String(),
+		MinQueryTime:        minQueryTime.String(),
+		MedianQueryTime:     medianQueryTime.String(),
+		AvgQueryTime:        avgQueryTime.String(),
+		MaxQueryTime:        maxQueryTime.String(),
+		P95QueryTime:        p95QueryTime.String(),
+	}
+
+	jsonData, err := json.MarshalIndent(stats, "", "  ")
+	if err != nil {
+		slog.Error("failed to generate JSON", "error", err)
+		return
+	}
+	fmt.Println(string(jsonData))
+}
+
+func hashHostname(hostname string) uint32 {
+	h := fnv.New32a()
+	h.Write([]byte(hostname))
+	return h.Sum32()
+}
+
+func getWorkerIndex(hostname string, numWorkers int) int {
+	hashValue := hashHostname(hostname)
+	return int(hashValue) % numWorkers
 }

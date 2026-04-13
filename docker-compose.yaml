@@ -6,7 +6,10 @@ services:
     restart: unless-stopped
     ports:
       - "5432:5432"
-    env_file: .env
+    environment:
+      - POSTGRES_USER=tsdbadmin
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=homework
     volumes:
       - timescaledb_data:/var/lib/postgresql/data
       - ./TimescaleDB_coding_assignment-RD_eng_setup/cpu_usage.sql:/docker-entrypoint-initdb.d/10_schema.sql
@@ -15,7 +18,7 @@ services:
 
     # https://www.postgresql.org/docs/current/app-pg-isready.html
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      test: ["CMD-SHELL", "pg_isready -U tsdbadmin -d homework"]
       interval: 10s
       timeout: 5s
       retries: 5

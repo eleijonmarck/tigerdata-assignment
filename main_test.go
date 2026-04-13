@@ -7,12 +7,10 @@ import (
 	"time"
 )
 
-// TestParseRow proves that we can safely handle standard data, corrupted data,
-// and End-of-File streams exactly as the assignment specified.
+// TestParseRow proves that we can safely handle standard data, corrupted data
 func TestParseRow(t *testing.T) {
-	// A mock CSV string containing:
-	// Row 1: Perfectly valid
-	// Row 2: Corrupted timestamp
+	// row1: valid
+	// row2: not valid timestamp
 	csvData := `host_000008,2017-01-01 08:59:22,2017-01-01 09:59:22
 host_000001,invalid-date-format,2017-01-01 09:59:22
 host_000001,invalid-date-format,2017-01-01 09:59:22, ,
@@ -52,21 +50,11 @@ host_000001,invalid-date-format,2017-01-01 09:59:22, ,
 }
 
 func TestGetWorkerIndex(t *testing.T) {
-	// Let's pretend the user ran `--workers 10`
 	numWorkers := 10
 
-	// Get the assignments
 	workerForHost8 := getWorkerIndex("host_000008", numWorkers)
-	workerForHost1 := getWorkerIndex("host_000001", numWorkers)
 
-	// 1. Prove Sticky Routing (Calling it twice goes to the same worker)
 	if getWorkerIndex("host_000008", numWorkers) != workerForHost8 {
 		t.Errorf("expected host_000008 to always be assigned to %d", workerForHost8)
-	}
-
-	// 2. Prove Load Distribution (Different hosts ideally go to different workers)
-	// (Note: With modulo 10, collisions CAN happen, but 8 and 1 will likely route differently)
-	if workerForHost8 == workerForHost1 {
-		t.Logf("Warning: Host 8 and Host 1 happened to have a hash collision and routed to the same worker. This is normal but bad for this specific test case!")
 	}
 }

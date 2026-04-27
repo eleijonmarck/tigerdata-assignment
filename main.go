@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -49,6 +50,13 @@ type QueryTask struct {
 	Hostname string
 	Startime time.Time
 	Endtime  time.Time
+}
+
+type ResultInflight struct {
+	Max     float64
+	Min     float64
+	Average float64
+	Median  float64
 }
 
 type QueryResult struct {
@@ -133,8 +141,9 @@ func main() {
 	}
 
 	var finalDurations []time.Duration
+	var inflightResult ResultInflight
 	// We need a secondary WaitGroup JUST for the aggregator,
-	// so main knows when the aggregator has finished reading the final dropped result
+	// so main knows when the aggregator has finished reading the final read result
 	var aggWg sync.WaitGroup
 	aggWg.Add(1)
 	go func() {
@@ -142,6 +151,9 @@ func main() {
 		// This loop naturally breaks when main calls `close(results)`
 		for res := range results {
 			finalDurations = append(finalDurations, res.Duration)
+			inflightResult.Max = max(inflightResult.Max, res.Duration.Seconds())
+			inflightResult.Min = max(inflightResult.Min, res.Duration.Seconds())
+
 		}
 	}()
 
@@ -173,14 +185,18 @@ func main() {
 	slog.Info("results finished")
 
 	prettyPrintResults(finalDurations)
-	slog.Info("shutting down")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	// slog.Info("shutting down")
+	// shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	// defer cancel()
 
 	pool.Close()
-	<-shutdownCtx.Done()
+	// <-shutdownCtx.Done()
 
 	slog.Info("shutdown complete")
+}
+
+type Query interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
 func Worker(ctx context.Context, pool *pgxpool.Pool, queryTasks chan QueryTask, results chan QueryResult, wg *sync.WaitGroup) {
